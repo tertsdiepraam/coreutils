@@ -175,7 +175,7 @@ pub fn str_to_arrnum(src: &str, radix_def_src: &dyn RadixDef) -> Vec<u8> {
     let mut intermed_in: Vec<u8> = Vec::new();
     for c in src.chars() {
         #[allow(clippy::single_match)]
-        match radix_def_src.from_char(c) {
+        match radix_def_src.parse_char(c) {
             Some(u) => {
                 intermed_in.push(u);
             }
@@ -189,7 +189,7 @@ pub fn arrnum_to_str(src: &[u8], radix_def_dest: &dyn RadixDef) -> String {
     let mut str_out = String::new();
     for u in src.iter() {
         #[allow(clippy::single_match)]
-        match radix_def_dest.from_u8(*u) {
+        match radix_def_dest.parse_u8(*u) {
             Some(c) => {
                 str_out.push(c);
             }
@@ -215,8 +215,8 @@ pub fn base_conv_str(
 
 pub trait RadixDef {
     fn get_max(&self) -> u8;
-    fn from_char(&self, x: char) -> Option<u8>;
-    fn from_u8(&self, x: u8) -> Option<char>;
+    fn parse_char(&self, x: char) -> Option<u8>;
+    fn parse_u8(&self, x: u8) -> Option<char>;
 }
 pub struct RadixTen;
 
@@ -228,13 +228,13 @@ impl RadixDef for RadixTen {
     fn get_max(&self) -> u8 {
         10
     }
-    fn from_char(&self, c: char) -> Option<u8> {
+    fn parse_char(&self, c: char) -> Option<u8> {
         match c {
             '0'..='9' => Some(c as u8 - ZERO_ASC),
             _ => None,
         }
     }
-    fn from_u8(&self, u: u8) -> Option<char> {
+    fn parse_u8(&self, u: u8) -> Option<char> {
         match u {
             0..=9 => Some((ZERO_ASC + u) as char),
             _ => None,
@@ -246,7 +246,7 @@ impl RadixDef for RadixHex {
     fn get_max(&self) -> u8 {
         16
     }
-    fn from_char(&self, c: char) -> Option<u8> {
+    fn parse_char(&self, c: char) -> Option<u8> {
         match c {
             '0'..='9' => Some(c as u8 - ZERO_ASC),
             'A'..='F' => Some(c as u8 + 10 - UPPER_A_ASC),
@@ -254,7 +254,7 @@ impl RadixDef for RadixHex {
             _ => None,
         }
     }
-    fn from_u8(&self, u: u8) -> Option<char> {
+    fn parse_u8(&self, u: u8) -> Option<char> {
         match u {
             0..=9 => Some((ZERO_ASC + u) as char),
             10..=15 => Some((UPPER_A_ASC + (u - 10)) as char),

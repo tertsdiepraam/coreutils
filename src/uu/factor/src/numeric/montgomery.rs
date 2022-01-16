@@ -16,6 +16,7 @@ pub(crate) trait Arithmetic: Copy + Sized {
 
     fn new(m: u64) -> Self;
     fn modulus(&self) -> u64;
+    #[allow(clippy::wrong_self_convention)]
     fn from_u64(&self, n: u64) -> Self::ModInt;
     fn to_u64(&self, n: Self::ModInt) -> u64;
     fn add(&self, a: Self::ModInt, b: Self::ModInt) -> Self::ModInt;

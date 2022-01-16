@@ -349,7 +349,7 @@ fn follow<T: BufRead>(readers: &mut [(T, &String)], settings: &Settings) -> URes
 
     let mut last = readers.len() - 1;
     let mut read_some = false;
-    let mut process = platform::ProcessChecker::new(settings.pid);
+    let process = platform::ProcessChecker::new(settings.pid);
 
     loop {
         sleep(Duration::new(0, settings.sleep_msec * 1000));

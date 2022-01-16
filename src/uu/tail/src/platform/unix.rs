@@ -29,8 +29,7 @@ impl ProcessChecker {
         ProcessChecker { pid: process_id }
     }
 
-    // Borrowing mutably to be aligned with Windows implementation
-    pub fn is_dead(&mut self) -> bool {
+    pub fn is_dead(&self) -> bool {
         unsafe { libc::kill(self.pid, 0) != 0 && get_errno() != libc::EPERM }
     }
 }

@@ -25,8 +25,7 @@ pub struct ProcessChecker {
 
 impl ProcessChecker {
     pub fn new(process_id: self::Pid) -> ProcessChecker {
-        #[allow(non_snake_case)]
-        let FALSE = 0i32;
+        const FALSE: i32 = 0;
         let h = unsafe { OpenProcess(SYNCHRONIZE, FALSE, process_id as DWORD) };
         ProcessChecker {
             dead: h.is_null(),
@@ -34,7 +33,7 @@ impl ProcessChecker {
         }
     }
 
-    pub fn is_dead(&mut self) -> bool {
+    pub fn is_dead(&self) -> bool {
         if !self.dead {
             self.dead = unsafe {
                 let status = WaitForSingleObject(self.handle, 0);
