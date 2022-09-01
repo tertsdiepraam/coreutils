@@ -232,16 +232,14 @@ fn test_big_h() {
 #[cfg(not(target_vendor = "apple"))]
 fn basic_succeeds() {
     let (at, mut ucmd) = at_and_ucmd!();
-    let one_group = nix::unistd::getgroups().unwrap();
-    // if there are no groups we can't run this test.
-    if let Some(group) = one_group.first() {
-        at.touch("f1");
-        ucmd.arg(group.as_raw().to_string())
-            .arg("f1")
-            .succeeds()
-            .no_stdout()
-            .no_stderr();
-    }
+    let group = nix::unistd::Gid::current();
+
+    at.touch("f1");
+    ucmd.arg(group.as_raw().to_string())
+        .arg("f1")
+        .succeeds()
+        .no_stdout()
+        .no_stderr();
 }
 
 #[test]
