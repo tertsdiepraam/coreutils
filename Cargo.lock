@@ -1968,9 +1968,9 @@ checksum = "9c8132065adcfd6e02db789d9285a0deb2f3fcb04002865ab67d5fb103533898"
 
 [[package]]
 name = "selinux"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966a861c0b329c3078d82b404f7086009487123fd0cc905a9caac55d8b13bee1"
+checksum = "b775d14782780e48a0c6529fe027454a80a66df85d1d9a2ea4de747f3295daf4"
 dependencies = [
  "bitflags",
  "libc",
