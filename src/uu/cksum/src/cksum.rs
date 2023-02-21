@@ -25,27 +25,24 @@ use uucore::{
 const USAGE: &str = "{} [OPTIONS] [FILE]...";
 const ABOUT: &str = "Print CRC and size for each file";
 
-fn detect_algo(program: &str) -> (&'static str, Box<dyn Digest + 'static>, usize) {
-    match program {
-        "sysv" => ("SYSV", Box::new(SYSV::new()) as Box<dyn Digest>, 512),
-        "bsd" => ("BSD", Box::new(BSD::new()) as Box<dyn Digest>, 1024),
-        "crc" => ("CRC", Box::new(CRC::new()) as Box<dyn Digest>, 256),
-        "md5" => ("MD5", Box::new(Md5::new()) as Box<dyn Digest>, 128),
-        "sha1" => ("SHA1", Box::new(Sha1::new()) as Box<dyn Digest>, 160),
-        "sha224" => ("SHA224", Box::new(Sha224::new()) as Box<dyn Digest>, 224),
-        "sha256" => ("SHA256", Box::new(Sha256::new()) as Box<dyn Digest>, 256),
-        "sha384" => ("SHA384", Box::new(Sha384::new()) as Box<dyn Digest>, 384),
-        "sha512" => ("SHA512", Box::new(Sha512::new()) as Box<dyn Digest>, 512),
-        "blake2b" => ("BLAKE2", Box::new(Blake2b::new()) as Box<dyn Digest>, 512),
-        "sm3" => ("SM3", Box::new(Sm3::new()) as Box<dyn Digest>, 512),
+fn cksum_algo<'a, I>(algorithm: &str, files: I) -> UResult<()>
+where
+    I: Iterator<Item = &'a OsStr>,
+{
+    match algorithm {
+        "sysv" => cksum::<_, SYSV>("SYSV", files),
+        "bsd" => cksum::<_, BSD>("BSD", files),
+        "crc" => cksum::<_, CRC>("CRC", files),
+        "md5" => cksum::<_, Md5>("MD5", files),
+        "sha" => cksum::<_, Sha1>("Sha1", files),
+        "sha224" => cksum::<_, Sha224>("SHA224", files),
+        "sha256" => cksum::<_, Sha256>("SHA256", files),
+        "sha384" => cksum::<_, Sha384>("SHA384", files),
+        "sha512" => cksum::<_, Sha512>("SHA512", files),
+        "blake2b" => cksum::<_, Blake2b>("BLAKE2", files),
+        "sm3" => cksum::<_, Sm3>("SM3", files),
         _ => panic!("unknown algorithm"),
     }
-}
-
-struct Options {
-    algo_name: &'static str,
-    digest: Box<dyn Digest + 'static>,
-    output_bits: usize,
 }
 
 /// Calculate checksum
@@ -55,9 +52,10 @@ struct Options {
 /// * `options` - CLI options for the assigning checksum algorithm
 /// * `files` - A iterator of OsStr which is a bunch of files that are using for calculating checksum
 #[allow(clippy::cognitive_complexity)]
-fn cksum<'a, I>(mut options: Options, files: I) -> UResult<()>
+fn cksum<'a, I, D>(algo_name: &'static str, files: I) -> UResult<()>
 where
     I: Iterator<Item = &'a OsStr>,
+    D: Digest
 {
     for filename in files {
         let filename = Path::new(filename);
@@ -74,32 +72,32 @@ where
                 File::open(filename).map_err_context(|| filename.to_str().unwrap().to_string())?;
             Box::new(file_buf) as Box<dyn Read>
         });
-        let (sum, sz) = digest_read(&mut options.digest, &mut file, options.output_bits)
+        let (sum, sz) = digest_read::<_, D>(&mut file, D::OUTPUT_BITS)
             .map_err_context(|| "failed to read input".to_string())?;
 
         // The BSD checksum output is 5 digit integer
         let bsd_width = 5;
-        match (options.algo_name, not_file) {
+        match (algo_name, not_file) {
             ("SYSV", true) => println!(
                 "{} {}",
                 sum.parse::<u16>().unwrap(),
-                div_ceil(sz, options.output_bits)
+                div_ceil(sz, D::OUTPUT_BITS)
             ),
             ("SYSV", false) => println!(
                 "{} {} {}",
                 sum.parse::<u16>().unwrap(),
-                div_ceil(sz, options.output_bits),
+                div_ceil(sz, D::OUTPUT_BITS),
                 filename.display()
             ),
             ("BSD", true) => println!(
                 "{:0bsd_width$} {:bsd_width$}",
                 sum.parse::<u16>().unwrap(),
-                div_ceil(sz, options.output_bits)
+                div_ceil(sz, D::OUTPUT_BITS)
             ),
             ("BSD", false) => println!(
                 "{:0bsd_width$} {:bsd_width$} {}",
                 sum.parse::<u16>().unwrap(),
-                div_ceil(sz, options.output_bits),
+                div_ceil(sz, D::OUTPUT_BITS),
                 filename.display()
             ),
             (_, true) => println!("{sum} {sz}"),
@@ -110,13 +108,10 @@ where
     Ok(())
 }
 
-fn digest_read<T: Read>(
-    digest: &mut Box<dyn Digest>,
+fn digest_read<T: Read, D: Digest>(
     reader: &mut BufReader<T>,
     output_bits: usize,
 ) -> io::Result<(String, usize)> {
-    digest.reset();
-
     // Read bytes from `reader` and write those bytes to `digest`.
     //
     // If `binary` is `false` and the operating system is Windows, then
@@ -129,11 +124,12 @@ fn digest_read<T: Read>(
     // `DigestWriter` and only written if the following character is
     // "\n". But when "\r" is the last character read, we need to force
     // it to be written.)
-    let mut digest_writer = DigestWriter::new(digest, true);
+    let mut digest = D::new();
+    let mut digest_writer = DigestWriter::new(&mut digest, true);
     let output_size = std::io::copy(reader, &mut digest_writer)? as usize;
     digest_writer.finalize();
 
-    if digest.output_bits() > 0 {
+    if D::OUTPUT_BITS > 0 {
         Ok((digest.result_str(), output_size))
     } else {
         // Assume it's SHAKE.  result_str() doesn't work with shake (as of 8/30/2016)
@@ -160,16 +156,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         None => "crc",
     };
 
-    let (name, algo, bits) = detect_algo(algo_name);
-    let opts = Options {
-        algo_name: name,
-        digest: algo,
-        output_bits: bits,
-    };
-
     match matches.get_many::<String>(options::FILE) {
-        Some(files) => cksum(opts, files.map(OsStr::new))?,
-        None => cksum(opts, iter::once(OsStr::new("-")))?,
+        Some(files) => cksum_algo(algo_name, files.map(OsStr::new))?,
+        None => cksum_algo(algo_name, iter::once(OsStr::new("-")))?,
     };
 
     Ok(())

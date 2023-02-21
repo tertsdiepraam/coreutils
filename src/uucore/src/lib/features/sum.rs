@@ -21,25 +21,23 @@ use hex::encode;
 use memchr::memmem;
 
 pub trait Digest {
-    fn new() -> Self
-    where
-        Self: Sized;
+    const OUTPUT_BITS: usize;
+    const OUTPUT_BYTES: usize = (Self::OUTPUT_BITS + 7) / 8;
+    fn new() -> Self;
     fn hash_update(&mut self, input: &[u8]);
     fn hash_finalize(&mut self, out: &mut [u8]);
-    fn reset(&mut self);
-    fn output_bits(&self) -> usize;
-    fn output_bytes(&self) -> usize {
-        (self.output_bits() + 7) / 8
-    }
     fn result_str(&mut self) -> String {
-        let mut buf: Vec<u8> = vec![0; self.output_bytes()];
+        let mut buf: Vec<u8> = vec![0; Self::OUTPUT_BYTES];
         self.hash_finalize(&mut buf);
         encode(buf)
     }
 }
 
 pub struct Blake2b(blake2b_simd::State);
+
 impl Digest for Blake2b {
+    const OUTPUT_BITS: usize = 512;
+
     fn new() -> Self {
         Self(blake2b_simd::State::new())
     }
@@ -52,18 +50,13 @@ impl Digest for Blake2b {
         let hash_result = &self.0.finalize();
         out.copy_from_slice(hash_result.as_bytes());
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        512
-    }
 }
 
 pub struct Blake3(blake3::Hasher);
+
 impl Digest for Blake3 {
+    const OUTPUT_BITS: usize = 256;
+
     fn new() -> Self {
         Self(blake3::Hasher::new())
     }
@@ -76,18 +69,13 @@ impl Digest for Blake3 {
         let hash_result = &self.0.finalize();
         out.copy_from_slice(hash_result.as_bytes());
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        256
-    }
 }
 
 pub struct Sm3(sm3::Sm3);
+
 impl Digest for Sm3 {
+    const OUTPUT_BITS: usize = 256;
+    
     fn new() -> Self {
         Self(<sm3::Sm3 as sm3::Digest>::new())
     }
@@ -99,14 +87,6 @@ impl Digest for Sm3 {
     fn hash_finalize(&mut self, out: &mut [u8]) {
         out.copy_from_slice(&<sm3::Sm3 as sm3::Digest>::finalize(self.0.clone()));
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        256
-    }
 }
 
 // NOTE: CRC_TABLE_LEN *must* be <= 256 as we cast 0..CRC_TABLE_LEN to u8
@@ -117,6 +97,7 @@ pub struct CRC {
     size: usize,
     crc_table: [u32; CRC_TABLE_LEN],
 }
+
 impl CRC {
     fn generate_crc_table() -> [u32; CRC_TABLE_LEN] {
         let mut table = [0; CRC_TABLE_LEN];
@@ -154,6 +135,8 @@ impl CRC {
 }
 
 impl Digest for CRC {
+    const OUTPUT_BITS: usize = 256;
+
     fn new() -> Self {
         Self {
             state: 0,
@@ -184,14 +167,6 @@ impl Digest for CRC {
         self.hash_finalize(&mut _out);
         format!("{}", self.state)
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        256
-    }
 }
 
 // This can be replaced with usize::div_ceil once it is stabilized.
@@ -204,7 +179,10 @@ pub fn div_ceil(a: usize, b: usize) -> usize {
 pub struct BSD {
     state: u16,
 }
+
 impl Digest for BSD {
+    const OUTPUT_BITS: usize = 128;
+
     fn new() -> Self {
         Self { state: 0 }
     }
@@ -225,20 +203,15 @@ impl Digest for BSD {
         self.hash_finalize(&mut _out);
         format!("{}", self.state)
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        128
-    }
 }
 
 pub struct SYSV {
     state: u32,
 }
+
 impl Digest for SYSV {
+    const OUTPUT_BITS: usize = 512;
+
     fn new() -> Self {
         Self { state: 0 }
     }
@@ -260,20 +233,14 @@ impl Digest for SYSV {
         self.hash_finalize(&mut _out);
         format!("{}", self.state)
     }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        512
-    }
 }
 
 // Implements the Digest trait for sha2 / sha3 algorithms with fixed output
 macro_rules! impl_digest_common {
     ($algo_type: ty, $size: expr) => {
         impl Digest for $algo_type {
+            const OUTPUT_BITS: usize = $size;
+
             fn new() -> Self {
                 Self(Default::default())
             }
@@ -285,14 +252,6 @@ macro_rules! impl_digest_common {
             fn hash_finalize(&mut self, out: &mut [u8]) {
                 digest::Digest::finalize_into_reset(&mut self.0, out.into());
             }
-
-            fn reset(&mut self) {
-                *self = Self::new();
-            }
-
-            fn output_bits(&self) -> usize {
-                $size
-            }
         }
     };
 }
@@ -301,6 +260,8 @@ macro_rules! impl_digest_common {
 macro_rules! impl_digest_shake {
     ($algo_type: ty) => {
         impl Digest for $algo_type {
+            const OUTPUT_BITS: usize = 0;
+            
             fn new() -> Self {
                 Self(Default::default())
             }
@@ -311,14 +272,6 @@ macro_rules! impl_digest_shake {
 
             fn hash_finalize(&mut self, out: &mut [u8]) {
                 digest::ExtendableOutputReset::finalize_xof_reset_into(&mut self.0, out);
-            }
-
-            fn reset(&mut self) {
-                *self = Self::new();
-            }
-
-            fn output_bits(&self) -> usize {
-                0
             }
         }
     };
@@ -360,8 +313,8 @@ impl_digest_shake!(Shake256);
 /// On Windows, if `binary` is `false`, then the [`write`]
 /// implementation replaces instances of "\r\n" with "\n" before passing
 /// the input bytes to the [`digest`].
-pub struct DigestWriter<'a> {
-    digest: &'a mut Box<dyn Digest>,
+pub struct DigestWriter<'a, D: Digest> {
+    digest: &'a mut D,
 
     /// Whether to write to the digest in binary mode or text mode on Windows.
     ///
@@ -377,8 +330,8 @@ pub struct DigestWriter<'a> {
     // It might be better to use a `#[cfg(windows)]` guard here.
 }
 
-impl<'a> DigestWriter<'a> {
-    pub fn new(digest: &'a mut Box<dyn Digest>, binary: bool) -> DigestWriter {
+impl<'a, D: Digest> DigestWriter<'a, D> {
+    pub fn new(digest: &'a mut D, binary: bool) -> Self {
         let was_last_character_carriage_return = false;
         DigestWriter {
             digest,
@@ -397,7 +350,7 @@ impl<'a> DigestWriter<'a> {
     }
 }
 
-impl<'a> Write for DigestWriter<'a> {
+impl<'a, D: Digest> Write for DigestWriter<'a, D> {
     #[cfg(not(windows))]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.digest.hash_update(buf);
