@@ -14,110 +14,244 @@
 //! [`DigestWriter`] struct provides a wrapper around [`Digest`] that
 //! implements the [`Write`] trait, for use in situations where calling
 //! [`write`] would be useful.
-use std::io::Write;
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 use hex::encode;
 #[cfg(windows)]
 use memchr::memmem;
 
-pub trait Digest {
+// This can be replaced with usize::div_ceil once it is stabilized.
+// This implementation approach is optimized for when `b` is a constant,
+// particularly a power of two.
+const fn div_ceil(a: usize, b: usize) -> usize {
+    (a + b - 1) / b
+}
+
+fn unwrap_or_dash(path: Option<&Path>) -> &Path {
+    path.unwrap_or(Path::new("-"))
+}
+
+fn format_bsd_like(sum: String, size: usize, path: Option<&Path>, alignment: usize) -> String {
+    match path {
+        Some(path) => format!("{sum:alignment$} {size:alignment$} {}", path.display()),
+        None => format!("{sum:alignment$} {size:alignment$}")
+    }
+}
+
+pub trait SumAlgorithm {
+    type Digest: SumDigest;
+    const NAME: &'static str;
+
+    fn output_bits(&self) -> usize;
+
+    fn sum(
+        &self,
+        mut reader: impl Read,
+        binary: bool,
+    ) -> std::io::Result<(<Self::Digest as SumDigest>::Out, usize)> {
+        // Read bytes from `reader` and write those bytes to `digest`.
+        //
+        // If `binary` is `false` and the operating system is Windows, then
+        // `DigestWriter` replaces "\r\n" with "\n" before it writes the
+        // bytes into `digest`. Otherwise, it just inserts the bytes as-is.
+        //
+        // In order to support replacing "\r\n", we must call `finalize()`
+        // in order to support the possibility that the last character read
+        // from the reader was "\r". (This character gets buffered by
+        // `DigestWriter` and only written if the following character is
+        // "\n". But when "\r" is the last character read, we need to force
+        // it to be written.)
+        let mut digest = Self::Digest::new();
+        let mut digest_writer = DigestWriter::new(&mut digest, binary);
+        let output_size = std::io::copy(&mut reader, &mut digest_writer)? as usize;
+        digest_writer.finalize();
+
+        let output_bytes = (self.output_bits() + 7) / 8;
+        let mut output = <Self::Digest as SumDigest>::Out::new(output_bytes);
+        digest.hash_finalize(&mut output);
+
+        Ok((output, output_size))
+    }
+
+    fn format(
+        &self,
+        tag: bool,
+        output: <Self::Digest as SumDigest>::Out,
+        _size: usize,
+        path: Option<&Path>,
+    ) -> String {
+        let p = unwrap_or_dash(path).display();
+        if tag {
+            format!("{} ({}) = {}", Self::NAME, p, output.fmt())
+        } else {
+            format!("{} {p}", output.fmt())
+        }
+    }
+}
+
+pub trait SumDigest {
+    type Out: SumOutput;
+
     fn new() -> Self
     where
         Self: Sized;
     fn hash_update(&mut self, input: &[u8]);
-    fn hash_finalize(&mut self, out: &mut [u8]);
-    fn reset(&mut self);
-    fn output_bits(&self) -> usize;
-    fn output_bytes(&self) -> usize {
-        (self.output_bits() + 7) / 8
+    fn hash_finalize(&mut self, out: &mut Self::Out);
+}
+
+// The output from a digest
+pub trait SumOutput {
+    fn new(len: usize) -> Self;
+    fn fmt(&self) -> String;
+}
+
+impl SumOutput for Vec<u8> {
+    fn new(len: usize) -> Self {
+        vec![0; len]
     }
-    fn result_str(&mut self) -> String {
-        let mut buf: Vec<u8> = vec![0; self.output_bytes()];
-        self.hash_finalize(&mut buf);
-        encode(buf)
+    fn fmt(&self) -> String {
+        encode(self)
     }
 }
 
-pub struct Blake2b(blake2b_simd::State);
-impl Digest for Blake2b {
-    fn new() -> Self {
-        Self(blake2b_simd::State::new())
+impl SumOutput for u16 {
+    fn new(_len: usize) -> Self {
+        0
     }
+    fn fmt(&self) -> String {
+        format!("{}", self)
+    }
+}
 
-    fn hash_update(&mut self, input: &[u8]) {
-        self.0.update(input);
+impl SumOutput for u32 {
+    fn new(_len: usize) -> Self {
+        0
     }
+    fn fmt(&self) -> String {
+        format!("{}", self)
+    }
+}
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
-        let hash_result = &self.0.finalize();
-        out.copy_from_slice(hash_result.as_bytes());
+impl SumOutput for u64 {
+    fn new(_len: usize) -> Self {
+        0
     }
+    fn fmt(&self) -> String {
+        format!("{}", self)
+    }
+}
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+pub struct Blake2b;
+
+impl SumAlgorithm for Blake2b {
+    type Digest = blake2b_simd::State;
+    const NAME: &'static str = "BLAKE2b";
 
     fn output_bits(&self) -> usize {
         512
     }
 }
 
-pub struct Blake3(blake3::Hasher);
-impl Digest for Blake3 {
+impl SumDigest for blake2b_simd::State {
+    type Out = Vec<u8>;
+
     fn new() -> Self {
-        Self(blake3::Hasher::new())
+        blake2b_simd::State::new()
     }
 
     fn hash_update(&mut self, input: &[u8]) {
-        self.0.update(input);
+        self.update(input);
     }
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
-        let hash_result = &self.0.finalize();
+    fn hash_finalize(&mut self, out: &mut Vec<u8>) {
+        let hash_result = &self.finalize();
         out.copy_from_slice(hash_result.as_bytes());
     }
+}
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+pub struct Blake3;
+
+impl SumAlgorithm for Blake3 {
+    type Digest = blake3::Hasher;
+    const NAME: &'static str = "BLAKE3";
 
     fn output_bits(&self) -> usize {
         256
     }
 }
 
-pub struct Sm3(sm3::Sm3);
-impl Digest for Sm3 {
+impl SumDigest for blake3::Hasher {
+    type Out = Vec<u8>;
+
     fn new() -> Self {
-        Self(<sm3::Sm3 as sm3::Digest>::new())
+        blake3::Hasher::new()
     }
 
     fn hash_update(&mut self, input: &[u8]) {
-        <sm3::Sm3 as sm3::Digest>::update(&mut self.0, input);
+        self.update(input);
     }
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
-        out.copy_from_slice(&<sm3::Sm3 as sm3::Digest>::finalize(self.0.clone()));
+    fn hash_finalize(&mut self, out: &mut Vec<u8>) {
+        let hash_result = &self.finalize();
+        out.copy_from_slice(hash_result.as_bytes());
     }
+}
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+pub struct Sm3;
+
+impl SumAlgorithm for Sm3 {
+    type Digest = sm3::Sm3;
+    const NAME: &'static str = "SM3";
 
     fn output_bits(&self) -> usize {
         256
+    }
+}
+
+impl SumDigest for sm3::Sm3 {
+    type Out = Vec<u8>;
+
+    fn new() -> Self {
+        sm3::Digest::new()
+    }
+
+    fn hash_update(&mut self, input: &[u8]) {
+        sm3::Digest::update(self, input);
+    }
+
+    fn hash_finalize(&mut self, out: &mut Vec<u8>) {
+        out.copy_from_slice(&sm3::Digest::finalize(self.clone()));
     }
 }
 
 // NOTE: CRC_TABLE_LEN *must* be <= 256 as we cast 0..CRC_TABLE_LEN to u8
 const CRC_TABLE_LEN: usize = 256;
 
-pub struct CRC {
+pub struct CRC;
+
+impl SumAlgorithm for CRC {
+    type Digest = CRCDigest;
+    const NAME: &'static str = "CRC";
+
+    fn output_bits(&self) -> usize {
+        32
+    }
+
+    fn format(&self, _tag: bool, output: u32, size: usize, path: Option<&Path>) -> String {
+        format_bsd_like(output.fmt(), size, path, 0)
+    }
+}
+
+pub struct CRCDigest {
     state: u32,
     size: usize,
     crc_table: [u32; CRC_TABLE_LEN],
 }
-impl CRC {
+
+impl CRCDigest {
     fn generate_crc_table() -> [u32; CRC_TABLE_LEN] {
         let mut table = [0; CRC_TABLE_LEN];
 
@@ -153,7 +287,9 @@ impl CRC {
     }
 }
 
-impl Digest for CRC {
+impl SumDigest for CRCDigest {
+    type Out = u32;
+
     fn new() -> Self {
         Self {
             state: 0,
@@ -169,42 +305,40 @@ impl Digest for CRC {
         self.size += input.len();
     }
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
+    fn hash_finalize(&mut self, out: &mut u32) {
         let mut sz = self.size;
         while sz != 0 {
             self.update(sz as u8);
             sz >>= 8;
         }
         self.state = !self.state;
-        out.copy_from_slice(&self.state.to_ne_bytes());
+        *out = self.state;
     }
+}
 
-    fn result_str(&mut self) -> String {
-        let mut _out: Vec<u8> = vec![0; 4];
-        self.hash_finalize(&mut _out);
-        format!("{}", self.state)
-    }
+pub struct BSD;
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+impl SumAlgorithm for BSD {
+    type Digest = BSDDigest;
+    const NAME: &'static str = "BSD";
 
     fn output_bits(&self) -> usize {
-        256
+        128
+    }
+
+    fn format(&self, _tag: bool, output: u16, size: usize, path: Option<&Path>) -> String {
+        // BSD format aligns to 5 digits
+        format_bsd_like(output.fmt(), div_ceil(size, 1024), path, 5)
     }
 }
 
-// This can be replaced with usize::div_ceil once it is stabilized.
-// This implementation approach is optimized for when `b` is a constant,
-// particularly a power of two.
-pub fn div_ceil(a: usize, b: usize) -> usize {
-    (a + b - 1) / b
-}
-
-pub struct BSD {
+pub struct BSDDigest {
     state: u16,
 }
-impl Digest for BSD {
+
+impl SumDigest for BSDDigest {
+    type Out = u16;
+
     fn new() -> Self {
         Self { state: 0 }
     }
@@ -216,29 +350,33 @@ impl Digest for BSD {
         }
     }
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
-        out.copy_from_slice(&self.state.to_ne_bytes());
+    fn hash_finalize(&mut self, out: &mut u16) {
+        *out = self.state;
     }
+}
 
-    fn result_str(&mut self) -> String {
-        let mut _out: Vec<u8> = vec![0; 2];
-        self.hash_finalize(&mut _out);
-        format!("{}", self.state)
-    }
+pub struct SYSV;
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
+impl SumAlgorithm for SYSV {
+    type Digest = SYSVDigest;
+    const NAME: &'static str = "SYSV";
 
     fn output_bits(&self) -> usize {
-        128
+        512
+    }
+
+    fn format(&self, _tag: bool, output: u16, size: usize, path: Option<&Path>) -> String {
+        format_bsd_like(output.fmt(), size, path, 0)
     }
 }
 
-pub struct SYSV {
+pub struct SYSVDigest {
     state: u32,
 }
-impl Digest for SYSV {
+
+impl SumDigest for SYSVDigest {
+    type Out = u16;
+
     fn new() -> Self {
         Self { state: 0 }
     }
@@ -249,49 +387,37 @@ impl Digest for SYSV {
         }
     }
 
-    fn hash_finalize(&mut self, out: &mut [u8]) {
+    fn hash_finalize(&mut self, out: &mut u16) {
         self.state = (self.state & 0xffff) + (self.state >> 16);
         self.state = (self.state & 0xffff) + (self.state >> 16);
-        out.copy_from_slice(&(self.state as u16).to_ne_bytes());
-    }
-
-    fn result_str(&mut self) -> String {
-        let mut _out: Vec<u8> = vec![0; 2];
-        self.hash_finalize(&mut _out);
-        format!("{}", self.state)
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn output_bits(&self) -> usize {
-        512
+        *out = self.state as u16;
     }
 }
 
 // Implements the Digest trait for sha2 / sha3 algorithms with fixed output
 macro_rules! impl_digest_common {
-    ($algo_type: ty, $size: expr) => {
-        impl Digest for $algo_type {
+    ($algo_type: ty, $name: literal, $digest: ty, $size: expr) => {
+        impl SumAlgorithm for $algo_type {
+            type Digest = $digest;
+            const NAME: &'static str = $name;
+            fn output_bits(&self) -> usize {
+                $size
+            }
+        }
+
+        impl SumDigest for $digest {
+            type Out = Vec<u8>;
             fn new() -> Self {
-                Self(Default::default())
+                Default::default()
             }
 
             fn hash_update(&mut self, input: &[u8]) {
-                digest::Digest::update(&mut self.0, input);
+                digest::Digest::update(self, input);
             }
 
-            fn hash_finalize(&mut self, out: &mut [u8]) {
-                digest::Digest::finalize_into_reset(&mut self.0, out.into());
-            }
-
-            fn reset(&mut self) {
-                *self = Self::new();
-            }
-
-            fn output_bits(&self) -> usize {
-                $size
+            fn hash_finalize(&mut self, out: &mut Vec<u8>) {
+                let slice: &mut [u8] = out;
+                digest::Digest::finalize_into_reset(self, slice.into());
             }
         }
     };
@@ -299,57 +425,65 @@ macro_rules! impl_digest_common {
 
 // Implements the Digest trait for sha2 / sha3 algorithms with variable output
 macro_rules! impl_digest_shake {
-    ($algo_type: ty) => {
-        impl Digest for $algo_type {
+    ($algo_type: ty, $name: literal, $digest: ty) => {
+        impl SumAlgorithm for $algo_type {
+            type Digest = $digest;
+            const NAME: &'static str = $name;
+            fn output_bits(&self) -> usize {
+                self.bits
+            }
+        }
+
+        impl SumDigest for $digest {
+            type Out = Vec<u8>;
+
             fn new() -> Self {
-                Self(Default::default())
+                Default::default()
             }
 
             fn hash_update(&mut self, input: &[u8]) {
-                digest::Update::update(&mut self.0, input);
+                digest::Update::update(self, input);
             }
 
-            fn hash_finalize(&mut self, out: &mut [u8]) {
-                digest::ExtendableOutputReset::finalize_xof_reset_into(&mut self.0, out);
-            }
-
-            fn reset(&mut self) {
-                *self = Self::new();
-            }
-
-            fn output_bits(&self) -> usize {
-                0
+            fn hash_finalize(&mut self, out: &mut Vec<u8>) {
+                digest::ExtendableOutputReset::finalize_xof_reset_into(self, out);
             }
         }
     };
 }
 
-pub struct Md5(md5::Md5);
-pub struct Sha1(sha1::Sha1);
-pub struct Sha224(sha2::Sha224);
-pub struct Sha256(sha2::Sha256);
-pub struct Sha384(sha2::Sha384);
-pub struct Sha512(sha2::Sha512);
-impl_digest_common!(Md5, 128);
-impl_digest_common!(Sha1, 160);
-impl_digest_common!(Sha224, 224);
-impl_digest_common!(Sha256, 256);
-impl_digest_common!(Sha384, 384);
-impl_digest_common!(Sha512, 512);
+pub struct Md5;
+pub struct Sha1;
+pub struct Sha224;
+pub struct Sha256;
+pub struct Sha384;
+pub struct Sha512;
+impl_digest_common!(Md5, "MD5", md5::Md5, 128);
+impl_digest_common!(Sha1, "SHA1", sha1::Sha1, 160);
+impl_digest_common!(Sha224, "SHA224", sha2::Sha224, 224);
+impl_digest_common!(Sha256, "SHA256", sha2::Sha256, 256);
+impl_digest_common!(Sha384, "SHA384", sha2::Sha384, 384);
+impl_digest_common!(Sha512, "SHA512", sha2::Sha512, 512);
 
-pub struct Sha3_224(sha3::Sha3_224);
-pub struct Sha3_256(sha3::Sha3_256);
-pub struct Sha3_384(sha3::Sha3_384);
-pub struct Sha3_512(sha3::Sha3_512);
-impl_digest_common!(Sha3_224, 224);
-impl_digest_common!(Sha3_256, 256);
-impl_digest_common!(Sha3_384, 384);
-impl_digest_common!(Sha3_512, 512);
+pub struct Sha3_224;
+pub struct Sha3_256;
+pub struct Sha3_384;
+pub struct Sha3_512;
+impl_digest_common!(Sha3_224, "SHA3-224", sha3::Sha3_224, 224);
+impl_digest_common!(Sha3_256, "SHA3-256", sha3::Sha3_256, 256);
+impl_digest_common!(Sha3_384, "SHA3-384", sha3::Sha3_384, 384);
+impl_digest_common!(Sha3_512, "SHA3-512", sha3::Sha3_512, 512);
 
-pub struct Shake128(sha3::Shake128);
-pub struct Shake256(sha3::Shake256);
-impl_digest_shake!(Shake128);
-impl_digest_shake!(Shake256);
+pub struct Shake128 {
+    pub bits: usize,
+}
+
+pub struct Shake256 {
+    pub bits: usize,
+}
+
+impl_digest_shake!(Shake128, "SHAKE128", sha3::Shake128);
+impl_digest_shake!(Shake256, "SHAKE256", sha3::Shake256);
 
 /// A struct that writes to a digest.
 ///
@@ -360,8 +494,8 @@ impl_digest_shake!(Shake256);
 /// On Windows, if `binary` is `false`, then the [`write`]
 /// implementation replaces instances of "\r\n" with "\n" before passing
 /// the input bytes to the [`digest`].
-pub struct DigestWriter<'a> {
-    digest: &'a mut Box<dyn Digest>,
+pub struct DigestWriter<'a, D: SumDigest> {
+    digest: &'a mut D,
 
     /// Whether to write to the digest in binary mode or text mode on Windows.
     ///
@@ -377,8 +511,8 @@ pub struct DigestWriter<'a> {
     // It might be better to use a `#[cfg(windows)]` guard here.
 }
 
-impl<'a> DigestWriter<'a> {
-    pub fn new(digest: &'a mut Box<dyn Digest>, binary: bool) -> DigestWriter {
+impl<'a, D: SumDigest> DigestWriter<'a, D> {
+    pub fn new(digest: &'a mut D, binary: bool) -> DigestWriter<D> {
         let was_last_character_carriage_return = false;
         DigestWriter {
             digest,
@@ -397,7 +531,7 @@ impl<'a> DigestWriter<'a> {
     }
 }
 
-impl<'a> Write for DigestWriter<'a> {
+impl<'a, D: SumDigest> Write for DigestWriter<'a, D> {
     #[cfg(not(windows))]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.digest.hash_update(buf);
