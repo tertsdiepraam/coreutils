@@ -10,23 +10,9 @@
         height: 200px;
         width: 100%;
     }
-
-    /* This is necessary to get the <use> tags to obey the CSS styles below */
-    g, polygon {
-        fill: inherit;
-        stroke: inherit;
-    }
-
-    /* Set the circle to the foreground color of the theme */
-    #gear circle {
-        stroke: var(--fg);
-    }
-
-    /* Set the stroke of polygons and the copies (via use) */
-    #gear polygon,
-    #gear use {
-        fill: var(--fg);
-        stroke: var(--fg);
+    
+    :root {
+        --color: var(--fg);
     }
 </style>
 
