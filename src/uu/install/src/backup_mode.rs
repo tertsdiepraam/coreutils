@@ -20,13 +20,15 @@ pub enum BackupMode {
     Existing,
 }
 
+// TODO: remove this conversion entirely by moving this to uu_core
+#[allow(clippy::from_over_into)]
 impl Into<uucore::backup_control::BackupMode> for BackupMode {
     fn into(self) -> uucore::backup_control::BackupMode {
         match self {
-            BackupMode::None => uucore::backup_control::BackupMode::NoBackup,
-            BackupMode::Simple => uucore::backup_control::BackupMode::SimpleBackup,
-            BackupMode::Numbered => uucore::backup_control::BackupMode::NumberedBackup,
-            BackupMode::Existing => uucore::backup_control::BackupMode::ExistingBackup,
+            Self::None => uucore::backup_control::BackupMode::NoBackup,
+            Self::Simple => uucore::backup_control::BackupMode::SimpleBackup,
+            Self::Numbered => uucore::backup_control::BackupMode::NumberedBackup,
+            Self::Existing => uucore::backup_control::BackupMode::ExistingBackup,
         }
     }
 }

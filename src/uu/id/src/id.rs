@@ -255,10 +255,10 @@ fn process_user(
     // getgroups(4, [10, 968, 975, 1000])      = 4
     // 1000 10 968 975
     // +++ exited with 0 +++
-    let groups = if num_users_specified != 0 {
-        belongs_to
-    } else {
+    let groups = if num_users_specified == 0 {
         groups.clone()
+    } else {
+        belongs_to
     };
 
     if settings.groups {
@@ -290,7 +290,7 @@ fn process_user(
 
     if settings.default_format() {
         id_print(
-            Ids {
+            &Ids {
                 uid,
                 gid,
                 euid: geteuid(),
@@ -329,7 +329,7 @@ fn handle_bsd_specific_options(
         auditid();
     }
 
-    return Ok(());
+    Ok(())
 }
 
 #[uucore::main]
@@ -500,13 +500,13 @@ fn auditid() {
     println!("asid={}", auditinfo.ai_asid);
 }
 
-fn id_print(ids: Ids, groups: &[u32], num_users_specified: usize) {
+fn id_print(ids: &Ids, groups: &[u32], num_users_specified: usize) {
     let Ids {
         uid,
         gid,
         euid,
         egid,
-    } = ids;
+    } = *ids;
 
     print!(
         "uid={}({})",

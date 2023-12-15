@@ -16,33 +16,33 @@ impl Value for Mode {
 
         // TODO: remove considering_dir parameter (@tertsdiepraam)
         match mode::parse(mode, false) {
-            Ok(m) => Ok(Mode(m)),
+            Ok(m) => Ok(Self(m)),
             Err(_) => Err(InstallError::InvalidMode(mode.to_string()).into()),
         }
     }
 }
 
 pub fn parse_gid(group: &str) -> Result<u32, InstallError> {
-    match grp2gid(&group) {
+    match grp2gid(group) {
         Ok(g) => Ok(g),
         Err(_) => {
             if let Ok(i) = group.parse() {
                 return Ok(i);
             }
-            Err(InstallError::InvalidGroup(group.to_string()).into())
+            Err(InstallError::InvalidGroup(group.to_string()))
         }
     }
 }
 
 pub fn parse_uid(user: &str) -> Result<u32, InstallError> {
-    match usr2uid(&user) {
+    match usr2uid(user) {
         Ok(u) => Ok(u),
         Err(_) => {
             if let Ok(i) = user.parse() {
                 return Ok(i);
             }
 
-            Err(InstallError::InvalidUser(user.to_string()).into())
+            Err(InstallError::InvalidUser(user.to_string()))
         }
     }
 }

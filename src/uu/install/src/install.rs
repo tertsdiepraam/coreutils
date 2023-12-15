@@ -154,7 +154,7 @@ fn standard(mut paths: Vec<PathBuf>, b: &Settings) -> UResult<()> {
     let target: PathBuf = if let Some(path) = &b.target_dir {
         path.into()
     } else {
-        let last_path: PathBuf = paths.pop().unwrap().into();
+        let last_path: PathBuf = paths.pop().unwrap();
 
         // paths has to contain more elements
         if paths.is_empty() {

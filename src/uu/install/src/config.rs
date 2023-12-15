@@ -22,7 +22,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings {
+        Self {
             main_function: MainFunction::Standard,
             mode: 0o755,
             backup_mode: BackupMode::None,
