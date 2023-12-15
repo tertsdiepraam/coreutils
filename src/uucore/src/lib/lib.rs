@@ -166,7 +166,7 @@ pub fn execution_phrase() -> &'static str {
     &EXECUTION_PHRASE
 }
 
-pub trait Args: Iterator<Item = OsString> + Sized {
+pub trait Args: Iterator<Item = OsString> + Sized + 'static {
     /// Collects the iterator into a `Vec<String>`, lossily converting the `OsString`s to `Strings`.
     fn collect_lossy(self) -> Vec<String> {
         self.map(|s| s.to_string_lossy().into_owned()).collect()
@@ -178,7 +178,7 @@ pub trait Args: Iterator<Item = OsString> + Sized {
     }
 }
 
-impl<T: Iterator<Item = OsString> + Sized> Args for T {}
+impl<T: Iterator<Item = OsString> + Sized + 'static> Args for T {}
 
 pub fn args_os() -> impl Iterator<Item = OsString> {
     ARGV.iter().cloned()
