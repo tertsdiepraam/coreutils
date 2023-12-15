@@ -2561,6 +2561,7 @@ dependencies = [
  "clap",
  "selinux",
  "uucore",
+ "uutils-args",
 ]
 
 [[package]]

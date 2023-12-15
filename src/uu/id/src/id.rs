@@ -30,48 +30,27 @@
 //   `uu_ls -Z` being implemented and therefore fails at the moment
 //
 
-#![allow(non_camel_case_types)]
-#![allow(dead_code)]
-
-use clap::{crate_version, Arg, ArgAction, Command};
+use crate::libc::gid_t;
+use crate::parse::parse;
+use clap::Command;
+use settings::Settings;
 use std::ffi::CStr;
 use uucore::display::Quotable;
 use uucore::entries::{self, Group, Locate, Passwd};
-use uucore::error::UResult;
 use uucore::error::{set_exit_code, USimpleError};
+use uucore::error::{UError, UResult};
 pub use uucore::libc;
 use uucore::libc::{getlogin, uid_t};
-use uucore::line_ending::LineEnding;
 use uucore::process::{getegid, geteuid, getgid, getuid};
-use uucore::{format_usage, help_about, help_section, help_usage, show_error};
+use uucore::show_error;
+
+mod parse;
+mod settings;
 
 macro_rules! cstr2cow {
     ($v:expr) => {
         unsafe { CStr::from_ptr($v).to_string_lossy() }
     };
-}
-
-const ABOUT: &str = help_about!("id.md");
-const USAGE: &str = help_usage!("id.md");
-const AFTER_HELP: &str = help_section!("after help", "id.md");
-
-#[cfg(not(feature = "selinux"))]
-static CONTEXT_HELP_TEXT: &str = "print only the security context of the process (not enabled)";
-#[cfg(feature = "selinux")]
-static CONTEXT_HELP_TEXT: &str = "print only the security context of the process";
-
-mod options {
-    pub const OPT_AUDIT: &str = "audit"; // GNU's id does not have this
-    pub const OPT_CONTEXT: &str = "context";
-    pub const OPT_EFFECTIVE_USER: &str = "user";
-    pub const OPT_GROUP: &str = "group";
-    pub const OPT_GROUPS: &str = "groups";
-    pub const OPT_HUMAN_READABLE: &str = "human-readable"; // GNU's id does not have this
-    pub const OPT_NAME: &str = "name";
-    pub const OPT_PASSWORD: &str = "password"; // GNU's id does not have this
-    pub const OPT_REAL_ID: &str = "real";
-    pub const OPT_ZERO: &str = "zero"; // BSD's id does not have this
-    pub const ARG_USERS: &str = "USER";
 }
 
 struct Ids {
@@ -81,16 +60,184 @@ struct Ids {
     egid: u32, // effective gid
 }
 
-struct State {
-    nflag: bool,  // --name
-    uflag: bool,  // --user
-    gflag: bool,  // --group
-    gsflag: bool, // --groups
-    rflag: bool,  // --real
-    zflag: bool,  // --zero
-    cflag: bool,  // --context
-    selinux_supported: bool,
-    ids: Option<Ids>,
+fn check_settings(settings: &Settings, num_users_specified: usize) -> UResult<()> {
+    if (settings.display_name || settings.real) && settings.default_format() && !settings.context {
+        return Err(USimpleError::new(
+            1,
+            "cannot print only names or real IDs in default format",
+        ));
+    }
+    if settings.zero && settings.default_format() && !settings.context {
+        // NOTE: GNU test suite "id/zero.sh" needs this stderr output:
+        return Err(USimpleError::new(
+            1,
+            "option --zero not permitted in default format",
+        ));
+    }
+    if num_users_specified > 0 && settings.context {
+        return Err(USimpleError::new(
+            1,
+            "cannot print security context when user specified",
+        ));
+    }
+
+    if settings.user && settings.group {
+        return Err(USimpleError::new(
+            1,
+            "--user (-u) conflicts with --group (-g)",
+        ));
+    }
+
+    if settings.groups {
+        for (name, set) in [
+            ("--group (-g)", settings.group),
+            ("--user (-u)", settings.user),
+            ("--context (-Z)", settings.context),
+            ("--human-readable (-P)", settings.human_readable),
+            ("--password (-p)", settings.password),
+            ("--audit (-A)", settings.audit),
+        ] {
+            if set {
+                return Err(USimpleError::new(
+                    1,
+                    format!("--groups (-G) conflicts with {name}"),
+                ));
+            }
+        }
+    }
+
+    if settings.audit {
+        for (name, set) in [
+            ("--group (-g)", settings.group),
+            ("--user (-u)", settings.user),
+            ("--human-readable (-P)", settings.human_readable),
+            ("--password (-p)", settings.password),
+            ("--groups (-G)", settings.groups),
+            ("--zero (-z)", settings.zero),
+        ] {
+            if set {
+                return Err(USimpleError::new(
+                    1,
+                    format!("--audit (-A) conflicts with {name}"),
+                ));
+            }
+        }
+    }
+
+    if settings.context {
+        for (name, set) in [
+            ("--group (-g)", settings.group),
+            ("--user (-u)", settings.user),
+        ] {
+            if set {
+                return Err(USimpleError::new(
+                    1,
+                    format!("--context (-C) conflicts with {name}"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_context(settings: &Settings) -> UResult<()> {
+    if settings.selinux_supported {
+        // print SElinux context and exit
+        #[cfg(all(any(target_os = "linux", target_os = "android"), feature = "selinux"))]
+        if let Ok(context) = selinux::SecurityContext::current(false) {
+            let bytes = context.as_bytes();
+            print!(
+                "{}{}",
+                String::from_utf8_lossy(bytes),
+                settings.line_ending()
+            );
+        } else {
+            // print error because `cflag` was explicitly requested
+            return Err(USimpleError::new(1, "can't get process context"));
+        }
+
+        Ok(())
+    } else {
+        Err(USimpleError::new(
+            1,
+            "--context (-Z) works only on an SELinux-enabled kernel",
+        ))
+    }
+}
+
+struct GetPasswordError;
+
+/// gets the password. Also has a side effect of setting an exit code when not found.
+/// Should be used with care. If Err() is returned, usually you should continue to the
+/// next user.
+fn get_password(user: &str) -> Result<Passwd, GetPasswordError> {
+    match Passwd::locate(user) {
+        Ok(p) => Ok(p),
+        Err(_) => {
+            show_error!("{}: no such user", user.quote());
+            set_exit_code(1);
+            Err(GetPasswordError)
+        }
+    }
+}
+
+/// Returns None when getting a password failed.
+fn get_user_info(
+    user: Option<&str>,
+    settings: &Settings,
+) -> Result<(uid_t, gid_t, Vec<gid_t>), GetPasswordError> {
+    Ok(if let Some(user) = user {
+        let password = get_password(user)?;
+        (password.uid, password.gid, password.belongs_to())
+    } else {
+        (
+            if settings.real { getuid() } else { geteuid() },
+            if settings.real { getgid() } else { getegid() },
+            Vec::new(),
+        )
+    })
+}
+
+fn process_user(
+    uid: uid_t,
+    gid: gid_t,
+    belongs_to: Vec<gid_t>,
+    settings: &Settings,
+    num_users_specified: usize,
+) {
+    if settings.group {
+        print!(
+            "{}",
+            if settings.display_name {
+                entries::gid2grp(gid).unwrap_or_else(|_| {
+                    show_error!("cannot find name for group ID {}", gid);
+                    set_exit_code(1);
+                    gid.to_string()
+                })
+            } else {
+                gid.to_string()
+            }
+        );
+    }
+
+    if settings.user {
+        print!(
+            "{}",
+            if settings.display_name {
+                entries::uid2usr(uid).unwrap_or_else(|_| {
+                    show_error!("cannot find name for user ID {}", uid);
+                    set_exit_code(1);
+                    uid.to_string()
+                })
+            } else {
+                uid.to_string()
+            }
+        );
+    }
+
+    let groups = entries::get_groups_gnu(Some(gid)).unwrap();
+
     // The behavior for calling GNU's `id` and calling GNU's `id $USER` is similar but different.
     // * The SELinux context is only displayed without a specified user.
     // * The `getgroups` system call is only used without a specified user, this causes
@@ -105,213 +252,127 @@ struct State {
     // getgroups(4, [10, 968, 975, 1000])      = 4
     // 1000 10 968 975
     // +++ exited with 0 +++
-    user_specified: bool,
+    let groups = if num_users_specified == 0 {
+        groups.clone()
+    } else {
+        belongs_to
+    };
+
+    if settings.groups {
+        print!(
+            "{}{}",
+            groups
+                .iter()
+                .map(|&id| {
+                    if settings.display_name {
+                        entries::gid2grp(id).unwrap_or_else(|_| {
+                            show_error!("cannot find name for group ID {}", id);
+                            set_exit_code(1);
+                            id.to_string()
+                        })
+                    } else {
+                        id.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(&settings.delimiter()),
+            // NOTE: this is necessary to pass GNU's "tests/id/zero.sh":
+            if settings.zero && num_users_specified > 1 {
+                "\0"
+            } else {
+                ""
+            }
+        );
+    }
+
+    if settings.default_format() {
+        id_print(
+            &Ids {
+                uid,
+                gid,
+                euid: geteuid(),
+                egid: getegid(),
+            },
+            &groups,
+            num_users_specified,
+        );
+    }
+    print!("{}", settings.line_ending());
+}
+
+fn handle_bsd_specific_options(
+    user: Option<&str>,
+    settings: &Settings,
+) -> Result<(), GetPasswordError> {
+    // GNU's `id` does not support the flags: -p/-P/-A.
+    if settings.password {
+        // BSD's `id` ignores all but the first specified user
+        if let Some(first_user) = user {
+            pline(Some(get_password(first_user)?.uid));
+        } else {
+            // if no user is given
+            pline(None);
+        }
+    } else if settings.human_readable {
+        // BSD's `id` ignores all but the first specified user
+        if let Some(first_user) = user {
+            pretty(Some(get_password(first_user)?));
+        } else {
+            // if no user is given
+            pretty(None);
+        }
+    } else if settings.audit {
+        // BSD's `id` ignores specified users
+        auditid();
+    }
+
+    Ok(())
 }
 
 #[uucore::main]
 #[allow(clippy::cognitive_complexity)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    let matches = uu_app().after_help(AFTER_HELP).try_get_matches_from(args)?;
+    let (settings, users) = parse(args)?;
 
-    let users: Vec<String> = matches
-        .get_many::<String>(options::ARG_USERS)
-        .map(|v| v.map(ToString::to_string).collect())
-        .unwrap_or_default();
+    let users: Vec<String> = users
+        .into_iter()
+        .map(|i| {
+            Ok(i.to_str()
+                .ok_or(USimpleError::new(
+                    1,
+                    format!("invalid utf8: {}", i.to_string_lossy()),
+                ))?
+                .to_string())
+        })
+        .collect::<Result<_, Box<dyn UError>>>()?;
+    let num_users_specified = users.len();
 
-    let mut state = State {
-        nflag: matches.get_flag(options::OPT_NAME),
-        uflag: matches.get_flag(options::OPT_EFFECTIVE_USER),
-        gflag: matches.get_flag(options::OPT_GROUP),
-        gsflag: matches.get_flag(options::OPT_GROUPS),
-        rflag: matches.get_flag(options::OPT_REAL_ID),
-        zflag: matches.get_flag(options::OPT_ZERO),
-        cflag: matches.get_flag(options::OPT_CONTEXT),
+    check_settings(&settings, num_users_specified)?;
 
-        selinux_supported: {
-            #[cfg(feature = "selinux")]
-            {
-                selinux::kernel_support() != selinux::KernelSupport::Unsupported
-            }
-            #[cfg(not(feature = "selinux"))]
-            {
-                false
-            }
-        },
-        user_specified: !users.is_empty(),
-        ids: None,
-    };
-
-    let default_format = {
-        // "default format" is when none of '-ugG' was used
-        !(state.uflag || state.gflag || state.gsflag)
-    };
-
-    if (state.nflag || state.rflag) && default_format && !state.cflag {
-        return Err(USimpleError::new(
-            1,
-            "cannot print only names or real IDs in default format",
-        ));
-    }
-    if state.zflag && default_format && !state.cflag {
-        // NOTE: GNU test suite "id/zero.sh" needs this stderr output:
-        return Err(USimpleError::new(
-            1,
-            "option --zero not permitted in default format",
-        ));
-    }
-    if state.user_specified && state.cflag {
-        return Err(USimpleError::new(
-            1,
-            "cannot print security context when user specified",
-        ));
+    if settings.context {
+        handle_context(&settings)?;
     }
 
-    let delimiter = {
-        if state.zflag {
-            "\0".to_string()
-        } else {
-            " ".to_string()
-        }
-    };
-    let line_ending = LineEnding::from_zero_flag(state.zflag);
-
-    if state.cflag {
-        if state.selinux_supported {
-            // print SElinux context and exit
-            #[cfg(all(any(target_os = "linux", target_os = "android"), feature = "selinux"))]
-            if let Ok(context) = selinux::SecurityContext::current(false) {
-                let bytes = context.as_bytes();
-                print!("{}{}", String::from_utf8_lossy(bytes), line_ending);
-            } else {
-                // print error because `cflag` was explicitly requested
-                return Err(USimpleError::new(1, "can't get process context"));
-            }
-            return Ok(());
-        } else {
-            return Err(USimpleError::new(
-                1,
-                "--context (-Z) works only on an SELinux-enabled kernel",
-            ));
-        }
+    // BSD's `id` ignores all but the first specified user
+    if let Err(GetPasswordError) =
+        handle_bsd_specific_options(users.get(0).map(|i| i.as_str()), &settings)
+    {
+        return Ok(());
     }
 
-    for i in 0..=users.len() {
-        let possible_pw = if state.user_specified {
-            match Passwd::locate(users[i].as_str()) {
-                Ok(p) => Some(p),
-                Err(_) => {
-                    show_error!("{}: no such user", users[i].quote());
-                    set_exit_code(1);
-                    if i + 1 >= users.len() {
-                        break;
-                    } else {
-                        continue;
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        // GNU's `id` does not support the flags: -p/-P/-A.
-        if matches.get_flag(options::OPT_PASSWORD) {
-            // BSD's `id` ignores all but the first specified user
-            pline(possible_pw.as_ref().map(|v| v.uid));
+    if num_users_specified == 0 {
+        let Ok((uid, gid, belongs_to)) = get_user_info(None, &settings) else {
             return Ok(());
         };
-        if matches.get_flag(options::OPT_HUMAN_READABLE) {
-            // BSD's `id` ignores all but the first specified user
-            pretty(possible_pw);
-            return Ok(());
-        }
-        if matches.get_flag(options::OPT_AUDIT) {
-            // BSD's `id` ignores specified users
-            auditid();
-            return Ok(());
-        }
 
-        let (uid, gid) = possible_pw.as_ref().map(|p| (p.uid, p.gid)).unwrap_or((
-            if state.rflag { getuid() } else { geteuid() },
-            if state.rflag { getgid() } else { getegid() },
-        ));
-        state.ids = Some(Ids {
-            uid,
-            gid,
-            euid: geteuid(),
-            egid: getegid(),
-        });
+        process_user(uid, gid, belongs_to, &settings, num_users_specified);
+    } else {
+        for user in &users {
+            let Ok((uid, gid, belongs_to)) = get_user_info(Some(user.as_str()), &settings) else {
+                continue;
+            };
 
-        if state.gflag {
-            print!(
-                "{}",
-                if state.nflag {
-                    entries::gid2grp(gid).unwrap_or_else(|_| {
-                        show_error!("cannot find name for group ID {}", gid);
-                        set_exit_code(1);
-                        gid.to_string()
-                    })
-                } else {
-                    gid.to_string()
-                }
-            );
-        }
-
-        if state.uflag {
-            print!(
-                "{}",
-                if state.nflag {
-                    entries::uid2usr(uid).unwrap_or_else(|_| {
-                        show_error!("cannot find name for user ID {}", uid);
-                        set_exit_code(1);
-                        uid.to_string()
-                    })
-                } else {
-                    uid.to_string()
-                }
-            );
-        }
-
-        let groups = entries::get_groups_gnu(Some(gid)).unwrap();
-        let groups = if state.user_specified {
-            possible_pw.as_ref().map(|p| p.belongs_to()).unwrap()
-        } else {
-            groups.clone()
-        };
-
-        if state.gsflag {
-            print!(
-                "{}{}",
-                groups
-                    .iter()
-                    .map(|&id| {
-                        if state.nflag {
-                            entries::gid2grp(id).unwrap_or_else(|_| {
-                                show_error!("cannot find name for group ID {}", id);
-                                set_exit_code(1);
-                                id.to_string()
-                            })
-                        } else {
-                            id.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(&delimiter),
-                // NOTE: this is necessary to pass GNU's "tests/id/zero.sh":
-                if state.zflag && state.user_specified && users.len() > 1 {
-                    "\0"
-                } else {
-                    ""
-                }
-            );
-        }
-
-        if default_format {
-            id_print(&state, &groups);
-        }
-        print!("{line_ending}");
-
-        if i + 1 >= users.len() {
-            break;
+            process_user(uid, gid, belongs_to, &settings, num_users_specified);
         }
     }
 
@@ -320,118 +381,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
 pub fn uu_app() -> Command {
     Command::new(uucore::util_name())
-        .version(crate_version!())
-        .about(ABOUT)
-        .override_usage(format_usage(USAGE))
-        .infer_long_args(true)
-        .arg(
-            Arg::new(options::OPT_AUDIT)
-                .short('A')
-                .conflicts_with_all([
-                    options::OPT_GROUP,
-                    options::OPT_EFFECTIVE_USER,
-                    options::OPT_HUMAN_READABLE,
-                    options::OPT_PASSWORD,
-                    options::OPT_GROUPS,
-                    options::OPT_ZERO,
-                ])
-                .help(
-                    "Display the process audit user ID and other process audit properties,\n\
-                      which requires privilege (not available on Linux).",
-                )
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_EFFECTIVE_USER)
-                .short('u')
-                .long(options::OPT_EFFECTIVE_USER)
-                .conflicts_with(options::OPT_GROUP)
-                .help("Display only the effective user ID as a number.")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_GROUP)
-                .short('g')
-                .long(options::OPT_GROUP)
-                .conflicts_with(options::OPT_EFFECTIVE_USER)
-                .help("Display only the effective group ID as a number")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_GROUPS)
-                .short('G')
-                .long(options::OPT_GROUPS)
-                .conflicts_with_all([
-                    options::OPT_GROUP,
-                    options::OPT_EFFECTIVE_USER,
-                    options::OPT_CONTEXT,
-                    options::OPT_HUMAN_READABLE,
-                    options::OPT_PASSWORD,
-                    options::OPT_AUDIT,
-                ])
-                .help(
-                    "Display only the different group IDs as white-space separated numbers, \
-                      in no particular order.",
-                )
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_HUMAN_READABLE)
-                .short('p')
-                .help("Make the output human-readable. Each display is on a separate line.")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_NAME)
-                .short('n')
-                .long(options::OPT_NAME)
-                .help(
-                    "Display the name of the user or group ID for the -G, -g and -u options \
-                      instead of the number.\nIf any of the ID numbers cannot be mapped into \
-                      names, the number will be displayed as usual.",
-                )
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_PASSWORD)
-                .short('P')
-                .help("Display the id as a password file entry.")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_REAL_ID)
-                .short('r')
-                .long(options::OPT_REAL_ID)
-                .help(
-                    "Display the real ID for the -G, -g and -u options instead of \
-                      the effective ID.",
-                )
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_ZERO)
-                .short('z')
-                .long(options::OPT_ZERO)
-                .help(
-                    "delimit entries with NUL characters, not whitespace;\n\
-                      not permitted in default format",
-                )
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::OPT_CONTEXT)
-                .short('Z')
-                .long(options::OPT_CONTEXT)
-                .conflicts_with_all([options::OPT_GROUP, options::OPT_EFFECTIVE_USER])
-                .help(CONTEXT_HELP_TEXT)
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new(options::ARG_USERS)
-                .action(ArgAction::Append)
-                .value_name(options::ARG_USERS)
-                .value_hint(clap::ValueHint::Username),
-        )
 }
 
 fn pretty(possible_pw: Option<Passwd>) {
@@ -548,11 +497,13 @@ fn auditid() {
     println!("asid={}", auditinfo.ai_asid);
 }
 
-fn id_print(state: &State, groups: &[u32]) {
-    let uid = state.ids.as_ref().unwrap().uid;
-    let gid = state.ids.as_ref().unwrap().gid;
-    let euid = state.ids.as_ref().unwrap().euid;
-    let egid = state.ids.as_ref().unwrap().egid;
+fn id_print(ids: &Ids, groups: &[u32], num_users_specified: usize) {
+    let Ids {
+        uid,
+        gid,
+        euid,
+        egid,
+    } = *ids;
 
     print!(
         "uid={}({})",
@@ -572,7 +523,7 @@ fn id_print(state: &State, groups: &[u32]) {
             gid.to_string()
         })
     );
-    if !state.user_specified && (euid != uid) {
+    if num_users_specified == 0 && (euid != uid) {
         print!(
             " euid={}({})",
             euid,
@@ -583,7 +534,7 @@ fn id_print(state: &State, groups: &[u32]) {
             })
         );
     }
-    if !state.user_specified && (egid != gid) {
+    if num_users_specified == 0 && (egid != gid) {
         print!(
             " egid={}({})",
             euid,
@@ -612,8 +563,8 @@ fn id_print(state: &State, groups: &[u32]) {
     );
 
     #[cfg(all(any(target_os = "linux", target_os = "android"), feature = "selinux"))]
-    if state.selinux_supported
-        && !state.user_specified
+    if settings.selinux_supported
+        && !settings.user_specified
         && std::env::var_os("POSIXLY_CORRECT").is_none()
     {
         // print SElinux context (does not depend on "-Z")
