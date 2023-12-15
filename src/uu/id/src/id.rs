@@ -33,11 +33,11 @@
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
+use crate::libc::gid_t;
 use crate::parse::parse;
 use clap::Command;
 use settings::Settings;
 use std::ffi::CStr;
-use std::ops::ControlFlow;
 use uucore::display::Quotable;
 use uucore::entries::{self, Group, Locate, Passwd};
 use uucore::error::{set_exit_code, USimpleError};
@@ -63,7 +63,7 @@ struct Ids {
     egid: u32, // effective gid
 }
 
-fn check_settings(settings: &Settings) -> UResult<()> {
+fn check_settings(settings: &Settings, num_users_specified: usize) -> UResult<()> {
     if (settings.display_name || settings.real) && settings.default_format() && !settings.context {
         return Err(USimpleError::new(
             1,
@@ -77,7 +77,7 @@ fn check_settings(settings: &Settings) -> UResult<()> {
             "option --zero not permitted in default format",
         ));
     }
-    if settings.user_specified && settings.context {
+    if num_users_specified > 0 && settings.context {
         return Err(USimpleError::new(
             1,
             "cannot print security context when user specified",
@@ -127,7 +127,7 @@ fn check_settings(settings: &Settings) -> UResult<()> {
         }
     }
 
-    if settings.audit {
+    if settings.context {
         for (name, set) in [
             ("--group (-g)", settings.group),
             ("--user (-u)", settings.user),
@@ -169,40 +169,46 @@ fn handle_context(settings: &Settings) -> UResult<()> {
     }
 }
 
-fn process_user(user: &str, settings: &Settings, num_users: usize) -> UResult<ControlFlow<()>> {
-    let possible_pw = if settings.user_specified {
-        match Passwd::locate(user) {
-            Ok(p) => Some(p),
-            Err(_) => {
-                show_error!("{}: no such user", user.quote());
-                set_exit_code(1);
-                return Ok(ControlFlow::Continue(()));
-            }
+struct GetPasswordError;
+
+/// gets the password. Also has a side effect of setting an exit code when not found.
+/// Should be used with care. If Err() is returned, usually you should continue to the
+/// next user.
+fn get_password(user: &str) -> Result<Passwd, GetPasswordError> {
+    match Passwd::locate(user) {
+        Ok(p) => Ok(p),
+        Err(_) => {
+            show_error!("{}: no such user", user.quote());
+            set_exit_code(1);
+            Err(GetPasswordError)
         }
-    } else {
-        None
-    };
-
-    // GNU's `id` does not support the flags: -p/-P/-A.
-    if settings.password {
-        // BSD's `id` ignores all but the first specified user
-        pline(possible_pw.as_ref().map(|v| v.uid));
-        return Ok(ControlFlow::Break(()));
-    } else if settings.human_readable {
-        // BSD's `id` ignores all but the first specified user
-        pretty(possible_pw);
-        return Ok(ControlFlow::Break(()));
-    } else if settings.audit {
-        // BSD's `id` ignores specified users
-        auditid();
-        return Ok(ControlFlow::Break(()));
     }
+}
 
-    let (uid, gid) = possible_pw.as_ref().map(|p| (p.uid, p.gid)).unwrap_or((
-        if settings.real { getuid() } else { geteuid() },
-        if settings.real { getgid() } else { getegid() },
-    ));
+/// Returns None when getting a password failed.
+fn get_user_info(
+    user: Option<&str>,
+    settings: &Settings,
+) -> Result<(uid_t, gid_t, Vec<gid_t>), GetPasswordError> {
+    Ok(if let Some(user) = user {
+        let password = get_password(user)?;
+        (password.uid, password.gid, password.belongs_to())
+    } else {
+        (
+            if settings.real { getuid() } else { geteuid() },
+            if settings.real { getgid() } else { getegid() },
+            Vec::new(),
+        )
+    })
+}
 
+fn process_user(
+    uid: uid_t,
+    gid: gid_t,
+    belongs_to: Vec<gid_t>,
+    settings: &Settings,
+    num_users_specified: usize,
+) {
     if settings.group {
         print!(
             "{}",
@@ -234,8 +240,23 @@ fn process_user(user: &str, settings: &Settings, num_users: usize) -> UResult<Co
     }
 
     let groups = entries::get_groups_gnu(Some(gid)).unwrap();
-    let groups = if settings.user_specified {
-        possible_pw.as_ref().map(|p| p.belongs_to()).unwrap()
+
+    // The behavior for calling GNU's `id` and calling GNU's `id $USER` is similar but different.
+    // * The SELinux context is only displayed without a specified user.
+    // * The `getgroups` system call is only used without a specified user, this causes
+    //   the order of the displayed groups to be different between `id` and `id $USER`.
+    //
+    // Example:
+    // $ strace -e getgroups id -G $USER
+    // 1000 10 975 968
+    // +++ exited with 0 +++
+    // $ strace -e getgroups id -G
+    // getgroups(0, NULL)                      = 4
+    // getgroups(4, [10, 968, 975, 1000])      = 4
+    // 1000 10 968 975
+    // +++ exited with 0 +++
+    let groups = if num_users_specified != 0 {
+        belongs_to
     } else {
         groups.clone()
     };
@@ -259,7 +280,7 @@ fn process_user(user: &str, settings: &Settings, num_users: usize) -> UResult<Co
                 .collect::<Vec<_>>()
                 .join(&settings.delimiter()),
             // NOTE: this is necessary to pass GNU's "tests/id/zero.sh":
-            if settings.zero && settings.user_specified && num_users > 0 {
+            if settings.zero && num_users_specified > 1 {
                 "\0"
             } else {
                 ""
@@ -269,7 +290,6 @@ fn process_user(user: &str, settings: &Settings, num_users: usize) -> UResult<Co
 
     if settings.default_format() {
         id_print(
-            &settings,
             Ids {
                 uid,
                 gid,
@@ -277,18 +297,45 @@ fn process_user(user: &str, settings: &Settings, num_users: usize) -> UResult<Co
                 egid: getegid(),
             },
             &groups,
+            num_users_specified,
         );
     }
     print!("{}", settings.line_ending());
+}
 
-    Ok(ControlFlow::Continue(()))
+fn handle_bsd_specific_options(
+    user: Option<&str>,
+    settings: &Settings,
+) -> Result<(), GetPasswordError> {
+    // GNU's `id` does not support the flags: -p/-P/-A.
+    if settings.password {
+        // BSD's `id` ignores all but the first specified user
+        if let Some(first_user) = user {
+            pline(Some(get_password(first_user)?.uid));
+        } else {
+            // if no user is given
+            pline(None);
+        }
+    } else if settings.human_readable {
+        // BSD's `id` ignores all but the first specified user
+        if let Some(first_user) = user {
+            pretty(Some(get_password(first_user)?));
+        } else {
+            // if no user is given
+            pretty(None);
+        }
+    } else if settings.audit {
+        // BSD's `id` ignores specified users
+        auditid();
+    }
+
+    return Ok(());
 }
 
 #[uucore::main]
 #[allow(clippy::cognitive_complexity)]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
-    // let matches = uu_app().after_help(AFTER_HELP).try_get_matches_from(args)?;
-    let (mut settings, users) = parse(args)?;
+    let (settings, users) = parse(args)?;
 
     let users: Vec<String> = users
         .into_iter()
@@ -301,18 +348,34 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 .to_string())
         })
         .collect::<Result<_, Box<dyn UError>>>()?;
+    let num_users_specified = users.len();
 
-    settings.user_specified = !users.is_empty();
-
-    check_settings(&settings)?;
+    check_settings(&settings, num_users_specified)?;
 
     if settings.context {
         handle_context(&settings)?;
     }
 
-    for user in &users {
-        if let ControlFlow::Break(()) = process_user(user, &settings, users.len())? {
-            break;
+    // BSD's `id` ignores all but the first specified user
+    if let Err(GetPasswordError) =
+        handle_bsd_specific_options(users.get(0).map(|i| i.as_str()), &settings)
+    {
+        return Ok(());
+    }
+
+    if num_users_specified == 0 {
+        let Ok((uid, gid, belongs_to)) = get_user_info(None, &settings) else {
+            return Ok(());
+        };
+
+        process_user(uid, gid, belongs_to, &settings, num_users_specified);
+    } else {
+        for user in &users {
+            let Ok((uid, gid, belongs_to)) = get_user_info(Some(user.as_str()), &settings) else {
+                continue;
+            };
+
+            process_user(uid, gid, belongs_to, &settings, num_users_specified);
         }
     }
 
@@ -437,7 +500,7 @@ fn auditid() {
     println!("asid={}", auditinfo.ai_asid);
 }
 
-fn id_print(settings: &Settings, ids: Ids, groups: &[u32]) {
+fn id_print(ids: Ids, groups: &[u32], num_users_specified: usize) {
     let Ids {
         uid,
         gid,
@@ -463,7 +526,7 @@ fn id_print(settings: &Settings, ids: Ids, groups: &[u32]) {
             gid.to_string()
         })
     );
-    if !settings.user_specified && (euid != uid) {
+    if num_users_specified == 0 && (euid != uid) {
         print!(
             " euid={}({})",
             euid,
@@ -474,7 +537,7 @@ fn id_print(settings: &Settings, ids: Ids, groups: &[u32]) {
             })
         );
     }
-    if !settings.user_specified && (egid != gid) {
+    if num_users_specified == 0 && (egid != gid) {
         print!(
             " egid={}({})",
             euid,
