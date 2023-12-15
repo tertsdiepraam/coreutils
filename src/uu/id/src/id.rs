@@ -97,7 +97,7 @@ fn check_settings(settings: &Settings, num_users_specified: usize) -> UResult<()
             ("--user (-u)", settings.user),
             ("--context (-Z)", settings.context),
             ("--human-readable (-P)", settings.human_readable),
-            ("--password (-P)", settings.password),
+            ("--password (-p)", settings.password),
             ("--audit (-A)", settings.audit),
         ] {
             if set {
@@ -114,7 +114,7 @@ fn check_settings(settings: &Settings, num_users_specified: usize) -> UResult<()
             ("--group (-g)", settings.group),
             ("--user (-u)", settings.user),
             ("--human-readable (-P)", settings.human_readable),
-            ("--password (-P)", settings.password),
+            ("--password (-p)", settings.password),
             ("--groups (-G)", settings.groups),
             ("--zero (-z)", settings.zero),
         ] {
