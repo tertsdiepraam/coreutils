@@ -30,9 +30,6 @@
 //   `uu_ls -Z` being implemented and therefore fails at the moment
 //
 
-#![allow(non_camel_case_types)]
-#![allow(dead_code)]
-
 use crate::libc::gid_t;
 use crate::parse::parse;
 use clap::Command;

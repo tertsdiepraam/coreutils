@@ -32,14 +32,14 @@ enum Arg {
     Name,
 
     /// Display the id as a password file entry.
-    #[arg("-P", "--pasword")]
+    #[arg("-P", "--password")]
     Password,
 
     /// Display the real ID for the -G, -g and -u options instead of the effective ID.
     #[arg("-r", "--real")]
     Real,
 
-    /// delimit entries with NUL characters, not whitespace;
+    /// Delimit entries with NUL characters, not whitespace;
     /// not permitted in default format
     #[arg("-z", "--zero")]
     Zero,
@@ -71,7 +71,5 @@ impl Options<Arg> for Settings {
 pub fn parse(
     args: impl IntoIterator<Item = OsString> + 'static,
 ) -> Result<(Settings, Vec<OsString>), uutils_args::Error> {
-    let (s, operands) = Settings::default().try_parse(args)?;
-
-    Ok((s, operands))
+    Settings::default().try_parse(args)
 }

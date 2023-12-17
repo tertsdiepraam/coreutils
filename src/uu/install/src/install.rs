@@ -69,7 +69,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 ///
 fn directory(paths: &[PathBuf], b: &Settings) -> UResult<()> {
     if paths.is_empty() {
-        Err(InstallError::DirNeedsArg().into())
+        Err(InstallError::DirNeedsArg.into())
     } else {
         for path in paths.iter().map(Path::new) {
             // if the path already exist, don't try to create it again
