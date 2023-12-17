@@ -2643,6 +2643,7 @@ version = "0.0.23"
 dependencies = [
  "clap",
  "uucore",
+ "uutils-args",
 ]
 
 [[package]]
