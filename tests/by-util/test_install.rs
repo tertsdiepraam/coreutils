@@ -66,24 +66,6 @@ fn test_install_failing_not_dir() {
 }
 
 #[test]
-fn test_install_unimplemented_arg() {
-    let (at, mut ucmd) = at_and_ucmd!();
-    let dir = "target_dir";
-    let file = "source_file";
-    let context_arg = "--context";
-
-    at.touch(file);
-    at.mkdir(dir);
-    ucmd.arg(context_arg)
-        .arg(file)
-        .arg(dir)
-        .fails()
-        .stderr_contains("Unimplemented");
-
-    assert!(!at.file_exists(format!("{dir}/{file}")));
-}
-
-#[test]
 fn test_install_ancestors_directories() {
     let (at, mut ucmd) = at_and_ucmd!();
     let ancestor1 = "ancestor1";
@@ -265,7 +247,7 @@ fn test_install_mode_failing() {
         .arg(dir)
         .arg(mode_arg)
         .fails()
-        .stderr_contains("Invalid mode string: invalid digit found in string");
+        .stderr_contains("invalid mode '999'");
 
     let dest_file = &format!("{dir}/{file}");
     assert!(at.file_exists(file));
@@ -1530,11 +1512,11 @@ fn test_install_compare_option() {
         .args(&["-C", "--preserve-timestamps", first, second])
         .fails()
         .code_is(1)
-        .stderr_contains("Options --compare and --preserve-timestamps are mutually exclusive");
+        .stderr_contains("options --compare (-C) and --preserve-timestamps are mutually exclusive");
     scene
         .ucmd()
         .args(&["-C", "--strip", "--strip-program=echo", first, second])
         .fails()
         .code_is(1)
-        .stderr_contains("Options --compare and --strip are mutually exclusive");
+        .stderr_contains("options --compare (-C) and --strip are mutually exclusive");
 }
