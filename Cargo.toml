@@ -349,6 +349,8 @@ uucore_procs = { version = ">=0.0.19", package = "uucore_procs", path = "src/uuc
 uu_ls = { version = ">=0.0.18", path = "src/uu/ls" }
 uu_base32 = { version = ">=0.0.18", path = "src/uu/base32" }
 
+uutils-args = {git="https://github.com/tertsdiepraam/uutils-args", branch="all-the-new-stuff"}
+
 [dependencies]
 clap = { workspace = true }
 once_cell = { workspace = true }

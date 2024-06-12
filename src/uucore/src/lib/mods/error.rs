@@ -350,6 +350,16 @@ impl UError for UUsageError {
     }
 }
 
+impl UError for uutils_args::Error {
+    fn code(&self) -> i32 {
+        self.exit_code
+    }
+
+    fn usage(&self) -> bool {
+        true
+    }
+}
+
 /// Wrapper type around [`std::io::Error`].
 ///
 /// The messages displayed by [`UIoError`] should match the error messages displayed by GNU

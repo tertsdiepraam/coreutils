@@ -18,6 +18,7 @@ path = "src/id.rs"
 clap = { workspace = true }
 uucore = { workspace = true, features = ["entries", "process"] }
 selinux = { workspace = true, optional = true }
+uutils-args = {workspace=true}
 
 [[bin]]
 name = "id"
